@@ -83,7 +83,11 @@ __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_PyPortal.git"
 
 # pylint: disable=line-too-long
 # you'll need to pass in an io username, width, height, format (bit depth), io key, and then url!
-IMAGE_CONVERTER_SERVICE = "https://io.adafruit.com/api/v2/%s/integrations/image-formatter?x-aio-key=%s&width=%d&height=%d&output=BMP%d&url=%s"
+# IMAGE_CONVERTER_SERVICE = "https://io.adafruit.com/api/v2/%s/integrations/image-formatter?x-aio-key=%s&width=%d&height=%d&output=BMP%d&url=%s"
+
+# local update 20190709
+IMAGE_CONVERTER_SERVICE = "http://192.168.0.57:3535/image_converter?url=%s&login=%s&password=%s&width=%d&height=%d"
+
 # you'll need to pass in an io username and key
 TIME_SERVICE = "https://io.adafruit.com/api/v2/%s/integrations/time/strftime?x-aio-key=%s"
 # our strftime is %Y-%m-%d %H:%M:%S.%L %j %u %z %Z see http://strftime.net/ for decoding details
@@ -601,12 +605,42 @@ class PyPortal:
         """
         print("Fetching stream from", url)
 
-        self.neo_status((100, 100, 0))
+        # patch 20190709
+        # see fetch...
+        self._connect_esp()
+        print("Retrieving data...", end='')
+        self.neo_status((100, 100, 0))   # yellow = fetching data
+        gc.collect()
+
+        # No headers needed?
+
+        # TODO: Possible issue with stream parameter being true....
         r = requests.get(url, stream=True)
+        gc.collect()
+
+        self.neo_status((0, 0, 100))   # green = got data
+        print("Reply is OK!")
 
         if self._debug:
             print(r.headers)
-        content_length = int(r.headers['content-length'])
+            # print(r.text)
+        
+        #content_length = int(r.headers['content-length'])
+
+        # patch 20190709
+        # begin
+        content_length = 0
+        
+        if 'content-length' in r.headers:
+            content_length = int(r.headers['content-length'])
+
+        if 'Content-Length' in r.headers:
+            content_length = int(r.headers['Content-Length'])
+
+        # end
+
+        print("content-length: ", content_length)
+        
         remaining = content_length
         print("Saving data to ", filename)
         stamp = time.monotonic()
@@ -657,15 +691,26 @@ class PyPortal:
         """Generate a converted image url from the url passed in,
            with the given width and height. aio_username and aio_key must be
            set in secrets."""
-        try:
-            aio_username = secrets['aio_username']
-            aio_key = secrets['aio_key']
-        except KeyError:
-            raise KeyError("\n\nOur image converter service require a login/password to rate-limit. Please register for a free adafruit.io account and place the user/key in your secrets file under 'aio_username' and 'aio_key'")# pylint: disable=line-too-long
+        # try:
+        #     aio_username = secrets['aio_username']
+        #     aio_key = secrets['aio_key']
+        # except KeyError:
+        #     raise KeyError("\n\nOur image converter service require a login/password to rate-limit. Please register for a free adafruit.io account and place the user/key in your secrets file under 'aio_username' and 'aio_key'")# pylint: disable=line-too-long
 
-        return IMAGE_CONVERTER_SERVICE % (aio_username, aio_key,
-                                          width, height,
-                                          color_depth, image_url)
+        # return IMAGE_CONVERTER_SERVICE % (aio_username, aio_key,
+        #                                   width, height,
+        #                                   color_depth, image_url)
+
+        # local update 20190709
+
+        try:
+            login = secrets['webcam_login']
+            password = secrets['webcam_password']
+        except KeyError:
+            raise KeyError("\n\nOur image converter service require a login/password!")
+                      
+        return IMAGE_CONVERTER_SERVICE % (image_url, login, password, width, height)
+
 
     def push_to_io(self, feed_key, data):
         # pylint: disable=line-too-long
@@ -728,62 +773,75 @@ class PyPortal:
             print("*** USING LOCALFILE FOR DATA - NOT INTERNET!!! ***")
             r = Fake_Requests(LOCALFILE)
 
-        if not r:
-            self._connect_esp()
-            # great, lets get the data
-            print("Retrieving data...", end='')
-            self.neo_status((100, 100, 0))   # yellow = fetching data
-            gc.collect()
-            r = requests.get(self._url, headers=self._headers)
-            gc.collect()
-            self.neo_status((0, 0, 100))   # green = got data
-            print("Reply is OK!")
-
-        if self._debug:
-            print(r.text)
-
-        if self._image_json_path or self._json_path:
-            try:
+        # local update
+        # if image_url_path is defined, we don't really need to have
+        # a url (data source) set. 20190709
+        if self._url:
+            if not r:
+                self._connect_esp()
+                # great, lets get the data
+                print("Retrieving data...", end='')
+                self.neo_status((100, 100, 0))   # yellow = fetching data
                 gc.collect()
-                json_out = r.json()
+
+                # Note: this is different than when we try to fetch an image, which
+                # uses a custom implementation of wget which has problems. 20190709
+                
+                r = requests.get(self._url, headers=self._headers)
                 gc.collect()
-            except ValueError:            # failed to parse?
-                print("Couldn't parse json: ", r.text)
-                raise
-            except MemoryError:
-                supervisor.reload()
+                self.neo_status((0, 0, 100))   # green = got data
+                print("Reply is OK!")
 
-        if self._regexp_path:
-            import re
+            if self._debug:
+                print(r.text)
 
+            if self._image_json_path or self._json_path:
+                try:
+                    gc.collect()
+                    json_out = r.json()
+                    gc.collect()
+                except ValueError:            # failed to parse?
+                    print("Couldn't parse json: ", r.text)
+                    raise
+                except MemoryError:
+                    supervisor.reload()
+
+            if self._regexp_path:
+                import re
+
+            # local update 20190709
+            # if self._image_url_path:
+            #     image_url = self._image_url_path
+
+            # extract desired text/values from json
+            if self._json_path:
+                for path in self._json_path:
+                    try:
+                        values.append(PyPortal._json_traverse(json_out, path))
+                    except KeyError:
+                        print(json_out)
+                        raise
+            elif self._regexp_path:
+                for regexp in self._regexp_path:
+                    values.append(re.search(regexp, r.text).group(1))
+            else:
+                values = r.text
+
+            if self._image_json_path:
+                try:
+                    image_url = PyPortal._json_traverse(json_out, self._image_json_path)
+                except KeyError as error:
+                    print("Error finding image data. '" + error.args[0] + "' not found.")
+                    self.set_background(self._default_bg)
+
+            # we're done with the requests object, lets delete it so we can do more!
+            json_out = None
+            r = None
+            gc.collect()
+
+        # local update 20190709
         if self._image_url_path:
             image_url = self._image_url_path
-
-        # extract desired text/values from json
-        if self._json_path:
-            for path in self._json_path:
-                try:
-                    values.append(PyPortal._json_traverse(json_out, path))
-                except KeyError:
-                    print(json_out)
-                    raise
-        elif self._regexp_path:
-            for regexp in self._regexp_path:
-                values.append(re.search(regexp, r.text).group(1))
-        else:
-            values = r.text
-
-        if self._image_json_path:
-            try:
-                image_url = PyPortal._json_traverse(json_out, self._image_json_path)
-            except KeyError as error:
-                print("Error finding image data. '" + error.args[0] + "' not found.")
-                self.set_background(self._default_bg)
-
-        # we're done with the requests object, lets delete it so we can do more!
-        json_out = None
-        r = None
-        gc.collect()
 
         if image_url:
             try:
@@ -800,16 +858,22 @@ class PyPortal:
                     filename = "/sd" + filename
                     chunk_size = 512  # current bug in big SD writes -> stick to 1 block
                 try:
+                    print("calling wget with image_url: ", image_url)
+                    chunk_size = 512
                     self.wget(image_url, filename, chunk_size=chunk_size)
+
                 except OSError as error:
                     print(error)
                     raise OSError("""\n\nNo writable filesystem found for saving datastream. Insert an SD card or set internal filesystem to be unsafe by setting 'disable_concurrent_write_protection' in the mount options in boot.py""") # pylint: disable=line-too-long
                 except RuntimeError as error:
                     print(error)
                     raise RuntimeError("wget didn't write a complete file")
+
                 self.set_background(filename, self._image_position)
+                
             except ValueError as error:
-                print("Error displaying cached image. " + error.args[0])
+                # print("Error displaying cached image. " + error.args[0])
+                print("Error displaying cached image: " + ''.join(error.args))
                 self.set_background(self._default_bg)
             finally:
                 image_url = None
