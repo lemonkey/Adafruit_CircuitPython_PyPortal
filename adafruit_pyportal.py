@@ -409,6 +409,9 @@ class PyPortal:
     def update_image_url_path(self, url_path):
         self._image_url_path = url_path
 
+    def update_caption_text(self, caption_text, caption_position, caption_color):
+        self.set_caption(caption_text, caption_position, caption_color)
+
     def set_background(self, file_or_color, position=None):
 
         """The background image to a bitmap file.
