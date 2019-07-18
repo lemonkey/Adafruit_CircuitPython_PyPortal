@@ -163,9 +163,10 @@ class PyPortal:
                  image_json_path=None, image_resize=None, image_position=None,
                  caption_text=None, caption_font=None, caption_position=None,
                  caption_color=0x808080, image_url_path=None,
-                 success_callback=None, esp=None, external_spi=None, debug=False):
+                 success_callback=None, esp=None, external_spi=None, debug=False, timeout=0, image_write_callback=None, write_chunk_size=12000):
 
         self._debug = debug
+        self._timeout = timeout
 
         try:
             self._backlight = pulseio.PWMOut(board.TFT_BACKLIGHT)  # pylint: disable=no-member
@@ -185,6 +186,8 @@ class PyPortal:
 
         self._regexp_path = regexp_path
         self._success_callback = success_callback
+        self._image_write_callback = image_write_callback
+        self._write_chunk_size = write_chunk_size
 
         if status_neopixel:
             self.neopix = neopixel.NeoPixel(status_neopixel, 1, brightness=0.2)
@@ -213,11 +216,19 @@ class PyPortal:
         for bootscreen in ("/thankyou.bmp", "/pyportal_startup.bmp"):
             try:
                 os.stat(bootscreen)
-                board.DISPLAY.show(self.splash)
+
+                # local edit 20190715
+                if not self._debug:
+                    board.DISPLAY.show(self.splash)
+
                 for i in range(100, -1, -1):  # dim down
                     self.set_backlight(i/100)
                     time.sleep(0.005)
-                self.set_background(bootscreen)
+
+                # local edit 20190715
+                if not self._debug:
+                    self.set_background(bootscreen)
+
                 board.DISPLAY.wait_for_frame()
                 for i in range(100):  # dim up
                     self.set_backlight(i/100)
@@ -229,10 +240,10 @@ class PyPortal:
         self._speaker_enable = DigitalInOut(board.SPEAKER_ENABLE)
         self._speaker_enable.switch_to_output(False)
         self.audio = audioio.AudioOut(board.AUDIO_OUT)
-        try:
-            self.play_file("pyportal_startup.wav")
-        except OSError:
-            pass # they deleted the file, no biggie!
+        # try:
+        #     self.play_file("pyportal_startup.wav")
+        # except OSError:
+        #     pass # they deleted the file, no biggie!
 
         if esp:  # If there was a passed ESP Object
             if self._debug:
@@ -252,7 +263,7 @@ class PyPortal:
             spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
 
             self._esp = adafruit_esp32spi.ESP_SPIcontrol(spi, esp32_cs, esp32_ready,
-                                                         esp32_reset, esp32_gpio0)
+                                                         esp32_reset, esp32_gpio0, debug=self._debug)
         #self._esp._debug = 1
         for _ in range(3): # retries
             try:
@@ -274,18 +285,38 @@ class PyPortal:
 
         # set the default background
         self.set_background(self._default_bg)
-        board.DISPLAY.show(self.splash)
+
+        # local edit 20190715
+        if not self._debug:
+            board.DISPLAY.show(self.splash)
 
         if self._debug:
             print("Init SD Card")
+
         sd_cs = DigitalInOut(board.SD_CS)
+
+        # local edit 20190715
+        if self._debug:
+            if sd_cs:
+                print("sd_cs has been set")
+
         self._sdcard = None
         try:
             self._sdcard = adafruit_sdcard.SDCard(spi, sd_cs)
+            
+            # local edit 20190715
+            if self._debug:
+                if self._sdcard:
+                    print("self._sdcard has been set")
+
             vfs = storage.VfsFat(self._sdcard)
             storage.mount(vfs, "/sd")
         except OSError as error:
             print("No SD card found:", error)
+
+        # local edit 20190715
+        if self._debug:
+            print("SD card initialized.")
 
         self._qr_group = None
         # Tracks whether we've hidden the background when we showed the QR code.
@@ -366,13 +397,16 @@ class PyPortal:
 
         gc.collect()
 
+    def update_image_url_path(self, url_path):
+        self._image_url_path = url_path
+
     def set_background(self, file_or_color, position=None):
+
         """The background image to a bitmap file.
 
         :param file_or_color: The filename of the chosen background image, or a hex color.
 
         """
-        print("Set background to ", file_or_color)
         while self._bg_group:
             self._bg_group.pop()
 
@@ -383,9 +417,15 @@ class PyPortal:
             return  # we're done, no background desired
         if self._bg_file:
             self._bg_file.close()
+
+        # local edit 20190715
+        print("Set background to ", file_or_color)
+
         if isinstance(file_or_color, str): # its a filenme:
             self._bg_file = open(file_or_color, "rb")
+            print("bg_file: ", self._bg_file)
             background = displayio.OnDiskBitmap(self._bg_file)
+            print("background: ", background)
             try:
                 self._bg_sprite = displayio.TileGrid(background,
                                                      pixel_shader=displayio.ColorConverter(),
@@ -614,11 +654,25 @@ class PyPortal:
 
         # No headers needed?
 
-        # TODO: Possible issue with stream parameter being true....
-        r = requests.get(url, stream=True)
+        # TODO: Possible issue with stream parameter being true?
+        # Adding optional timeout parameter to help with debugging. 20190717
+        r = requests.get(url, stream=True, timeout=self._timeout)
+
+        print("status: ", r.status_code)
+        print("reason: ", r.reason)
+
         gc.collect()
 
         self.neo_status((0, 0, 100))   # green = got data
+
+        # if status is 200, we're ok, otherwise assume failure 20190717
+        if r.status_code != 200:
+            # error_details = "status code: " + str(r.status_code) + ", reason: " + r.reason
+            # print("Error with wget request! ", error_details)
+            r.close()
+            # raise RuntimeError("Error with wget request! ", error_details)
+            raise RuntimeError("Error with wget request! ", str(r.status_code))
+
         print("Reply is OK!")
 
         if self._debug:
@@ -642,28 +696,48 @@ class PyPortal:
         print("content-length: ", content_length)
         
         remaining = content_length
+        
         print("Saving data to ", filename)
+        
         stamp = time.monotonic()
         file = open(filename, "wb")
-        for i in r.iter_content(min(remaining, chunk_size)):  # huge chunks!
+        
+        print("Writing to file: ", filename)
+
+        remaining_chunks = r.iter_content(min(remaining, chunk_size))
+
+        print("remaining chunks: ", remaining_chunks)
+
+        for i in remaining_chunks:  # huge chunks!
             self.neo_status((0, 100, 100))
             remaining -= len(i)
             file.write(i)
+
             if self._debug:
                 print("Read %d bytes, %d remaining" % (content_length-remaining, remaining))
-            else:
-                print(".", end='')
+            # else:
+            # print(".", end='')
+           
+            if self._image_write_callback:
+                self._image_write_callback({"filename":filename, "chunk_size":chunk_size, "total_bytes":content_length, "bytes_read":content_length-remaining, "remaining":remaining})
+
             if not remaining:
+                print("Nothing left to get! Closing file...")
                 break
             self.neo_status((100, 100, 0))
+
         file.close()
 
         r.close()
         stamp = time.monotonic() - stamp
-        print("Created file of %d bytes in %0.1f seconds" % (os.stat(filename)[6], stamp))
+
+        # Sometimes content_length != length of file we just wrote depending on
+        # network conditions, etc. 20190717
+        print("Created file of %d bytes (content_length %d) in %0.1f seconds" % (os.stat(filename)[6], content_length, stamp))
         self.neo_status((0, 0, 0))
         if not content_length == os.stat(filename)[6]:
-            raise RuntimeError
+            # raise RuntimeError("content_length != os.stat(filename)[6]")
+            print("WARNING! content_length != written file size: ", os.stat(filename)[6])
 
     def _connect_esp(self):
         self.neo_status((0, 0, 100))
@@ -852,23 +926,28 @@ class PyPortal:
                 print("convert URL:", image_url)
                 # convert image to bitmap and cache
                 #print("**not actually wgetting**")
-                filename = "/cache.bmp"
+                filename = "/cache.bmp"                
                 chunk_size = 12000      # default chunk size is 12K (for QSPI)
+                if not self._write_chunk_size is None:
+                    chunk_size = self._write_chunk_size
                 if self._sdcard:
                     filename = "/sd" + filename
-                    chunk_size = 512  # current bug in big SD writes -> stick to 1 block
+                    # chunk_size = 512   # current bug in big SD writes -> stick to 1 block
                 try:
                     print("calling wget with image_url: ", image_url)
-                    chunk_size = 512
+                    #chunk_size = 512
                     self.wget(image_url, filename, chunk_size=chunk_size)
 
                 except OSError as error:
                     print(error)
                     raise OSError("""\n\nNo writable filesystem found for saving datastream. Insert an SD card or set internal filesystem to be unsafe by setting 'disable_concurrent_write_protection' in the mount options in boot.py""") # pylint: disable=line-too-long
                 except RuntimeError as error:
-                    print(error)
-                    raise RuntimeError("wget didn't write a complete file")
+                    for str in error.args:
+                        print("error arg: ", str)
+                    print("Error during wget: ", error)
+                    raise RuntimeError("RuntimeError during wget!")
 
+                values = [filename]
                 self.set_background(filename, self._image_position)
                 
             except ValueError as error:
