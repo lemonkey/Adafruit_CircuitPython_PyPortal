@@ -86,7 +86,11 @@ __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_PyPortal.git"
 # IMAGE_CONVERTER_SERVICE = "https://io.adafruit.com/api/v2/%s/integrations/image-formatter?x-aio-key=%s&width=%d&height=%d&output=BMP%d&url=%s"
 
 # local update 20190709
-IMAGE_CONVERTER_SERVICE = "http://192.168.0.57:3535/image_converter?url=%s&login=%s&password=%s&width=%d&height=%d"
+# office droid node
+IMAGE_CONVERTER_NODE_SERVICE = "http://192.168.0.57:3535/image_converter?url=%s&login=%s&password=%s&width=%d&height=%d"
+
+# darthomir update 20190718
+IMAGE_CONVERTER_SERVICE = "http://192.168.0.15/imagemagick/jpeg2bmp.php?url=%s&width=%d&height=%d"
 
 # you'll need to pass in an io username and key
 TIME_SERVICE = "https://io.adafruit.com/api/v2/%s/integrations/time/strftime?x-aio-key=%s"
@@ -163,7 +167,9 @@ class PyPortal:
                  image_json_path=None, image_resize=None, image_position=None,
                  caption_text=None, caption_font=None, caption_position=None,
                  caption_color=0x808080, image_url_path=None,
-                 success_callback=None, esp=None, external_spi=None, debug=False, timeout=0, image_write_callback=None, write_chunk_size=12000):
+                 success_callback=None, esp=None, external_spi=None, 
+                 debug=False, timeout=0, image_write_callback=None, 
+                 write_chunk_size=12000, use_node_service=False):
 
         self._debug = debug
         self._timeout = timeout
@@ -188,6 +194,9 @@ class PyPortal:
         self._success_callback = success_callback
         self._image_write_callback = image_write_callback
         self._write_chunk_size = write_chunk_size
+        self._use_node_service = True
+
+        print("_use_node_service: ", self._use_node_service)
 
         if status_neopixel:
             self.neopix = neopixel.NeoPixel(status_neopixel, 1, brightness=0.2)
@@ -706,15 +715,26 @@ class PyPortal:
 
         remaining_chunks = r.iter_content(min(remaining, chunk_size))
 
-        print("remaining chunks: ", remaining_chunks)
+        # print("remaining chunks: ", remaining_chunks)
 
         for i in remaining_chunks:  # huge chunks!
+
+            # if self._debug:
+            # print("i from remaining_chunks: ", len(i))
+
             self.neo_status((0, 100, 100))
             remaining -= len(i)
+
             file.write(i)
 
             if self._debug:
                 print("Read %d bytes, %d remaining" % (content_length-remaining, remaining))
+
+            if remaining < 0:
+                # we're done!
+                print("remaining is now negative: ", remaining)
+                remaining = 0
+
             # else:
             # print(".", end='')
            
@@ -761,7 +781,7 @@ class PyPortal:
                 time.sleep(3)
 
     @staticmethod
-    def image_converter_url(image_url, width, height, color_depth=16):
+    def image_converter_url(image_url, width, height, color_depth=16, use_node_service=False):
         """Generate a converted image url from the url passed in,
            with the given width and height. aio_username and aio_key must be
            set in secrets."""
@@ -777,13 +797,17 @@ class PyPortal:
 
         # local update 20190709
 
-        try:
-            login = secrets['webcam_login']
-            password = secrets['webcam_password']
-        except KeyError:
-            raise KeyError("\n\nOur image converter service require a login/password!")
+        if True:
+            try:
+                login = secrets['webcam_login']
+                password = secrets['webcam_password']
+            except KeyError:
+                raise KeyError("\n\nOur image converter service require a login/password!")
                       
-        return IMAGE_CONVERTER_SERVICE % (image_url, login, password, width, height)
+            return IMAGE_CONVERTER_NODE_SERVICE % (image_url, login, password, width, height)
+        else:
+            # darthomir
+            return IMAGE_CONVERTER_SERVICE % (image_url, width, height)
 
 
     def push_to_io(self, feed_key, data):
@@ -906,7 +930,9 @@ class PyPortal:
                     image_url = PyPortal._json_traverse(json_out, self._image_json_path)
                 except KeyError as error:
                     print("Error finding image data. '" + error.args[0] + "' not found.")
-                    self.set_background(self._default_bg)
+                    # 20190718
+                    # leave current image alone
+                    #self.set_background(self._default_bg)
 
             # we're done with the requests object, lets delete it so we can do more!
             json_out = None
@@ -922,7 +948,7 @@ class PyPortal:
                 print("original URL:", image_url)
                 image_url = self.image_converter_url(image_url,
                                                      self._image_resize[0],
-                                                     self._image_resize[1])
+                                                     self._image_resize[1], self._use_node_service)
                 print("convert URL:", image_url)
                 # convert image to bitmap and cache
                 #print("**not actually wgetting**")
@@ -948,12 +974,18 @@ class PyPortal:
                     raise RuntimeError("RuntimeError during wget!")
 
                 values = [filename]
+
+                # testing 20190717
+                # board.DISPLAY.show(filename)
+
                 self.set_background(filename, self._image_position)
                 
             except ValueError as error:
                 # print("Error displaying cached image. " + error.args[0])
                 print("Error displaying cached image: " + ''.join(error.args))
-                self.set_background(self._default_bg)
+                # 20190718
+                # leave current image alone
+                #self.set_background(self._default_bg)
             finally:
                 image_url = None
                 gc.collect()
@@ -1069,6 +1101,4 @@ class PyPortal:
                 the_line = ''+w
         if the_line:      # last line remaining
             the_lines.append(the_line)
-        # remove first space from first line:
-        the_lines[0] = the_lines[0][1:]
-        return the_lines
+   
